@@ -1,76 +1,194 @@
-const fs = require('fs');
-const tours = JSON.parse(
-  fs.readFileSync(`${__dirname}/../dev-data/data/tours-simple.json`),
-);
+const Tour = require('../models/tourModel');
+const AppError = require('../utils/appError');
+const catchAsync = require('../utils/catchAsync');
+const factory = require('./handlerFactory');
 
-exports.checkId = (req, res, next, val) => {
-  // console.log(`the id is: ${val}`);
-  const id = Number(req.params.id);
-  const tour = tours.find((tour) => tour.id === id);
-
-  if (!tour)
-    return res.status(404).send({ status: 'fail', message: 'Invalid Id' });
+// exports.checkBody = (req, res, next) => {
+//   console.log('runs');
+//   if (!req.body.name || !req.body.price) {
+//     return res.status(400).json({
+//       status: 'fail',
+//       message: 'Name or Price Not available!! try again',
+//     });
+//   }
+//   next();
+// };
+exports.aliasTopTours = (req, res, next) => {
+  req.url =
+    '/?' +
+    'limit=5&' +
+    'sort=price,-ratingsAverage&' +
+    'fields=name,price,ratingsAverage,summary,difficulty';
   next();
 };
 
-exports.checkBody = (req, res, next) => {
-  console.log('runs');
-  if (!req.body.name || !req.body.price) {
-    return res.status(400).json({
-      status: 'fail',
-      message: 'Name or Price Not available!! try again',
-    });
-  }
-  next();
-};
+// CRUD Functions
 
-exports.getAllTours = (req, res) => {
-  res.status(200).json({
-    status: 'success',
-    requestedAt: req.requestTime,
-    results: tours.length,
-    data: { tours: tours },
-  });
-};
+exports.getAllTours = factory.getAll(Tour);
+exports.addNewTour = factory.createOne(Tour);
+exports.getTour = factory.getOne(Tour, { path: 'reviews' });
+exports.updateTour = factory.updateOne(Tour);
+exports.deleteTour = factory.deleteOne(Tour);
 
-exports.addNewTour = (req, res) => {
-  const newId = tours[tours.length - 1].id + 1;
-  const newTour = Object.assign({ id: newId }, req.body);
-
-  tours.push(newTour);
-  fs.writeFile(
-    `${__dirname}/dev-data/data/tours-simple.json`,
-    JSON.stringify(tours),
-    (err) => {
-      res.status(201).json({
-        status: 'success',
-        data: {
-          tour: newTour,
-        },
-      });
+exports.getTourStats = catchAsync(async (req, res, next) => {
+  const stats = await Tour.aggregate([
+    {
+      $match: { ratingsAverage: { $gte: 4.5 } },
     },
-  );
-};
-
-exports.getTour = (req, res) => {
-  const id = Number(req.params.id);
-  const tour = tours.find((tour) => tour.id === id);
-
-  res.status(200).send({ status: 'success', data: { tour } });
-};
-
-exports.updateTour = (req, res) => {
+    {
+      $group: {
+        _id: '$difficulty',
+        numTours: { $sum: 1 },
+        numRating: { $sum: '$ratingsQuantity' },
+        avgRating: { $avg: '$ratingsAverage' },
+        avgPrice: { $avg: '$price' },
+        minPrice: { $min: '$price' },
+        maxPrice: { $max: '$price' },
+      },
+    },
+    {
+      $sort: {
+        avgPrice: 1,
+      },
+    },
+    // {
+    //   $match: {
+    //     _id: { $ne: 'easy' },
+    //   },
+    // },
+  ]);
   res.status(200).send({
     status: 'success',
     data: {
-      tour: '<h1>updated tour here<h1/>',
+      stats,
     },
   });
-};
+});
 
-exports.deleteTour = (req, res) => {
-  res.status(204).send({
+exports.getMonthlyPlan = catchAsync(async (req, res, next) => {
+  const year = req.params.year * 1;
+  const plan = await Tour.aggregate([
+    {
+      $unwind: '$startDates',
+    },
+    {
+      $match: {
+        startDates: {
+          $gte: new Date(`${year}-01-01`),
+          $lte: new Date(`${year}-12-31`),
+        },
+      },
+    },
+    {
+      $group: {
+        _id: { $month: '$startDates' },
+        numTourStarts: { $sum: 1 },
+        tours: { $push: '$name' },
+        avgRating: { $avg: '$ratingsAverage' },
+        avgPrice: { $avg: '$price' },
+        minPrice: { $min: '$price' },
+        maxPrice: { $max: '$price' },
+      },
+    },
+    {
+      $addFields: { month: '$_id' },
+    },
+    {
+      $project: { _id: 0 },
+    },
+    {
+      $limit: 6,
+    },
+    {
+      $sort: {
+        numTourStarts: -1,
+      },
+    },
+    // {
+    //   $match: {
+    //     _id: { $ne: 'easy' },
+    //   },
+    // },
+  ]);
+  res.status(200).send({
     status: 'success',
-    data: null,
+    data: {
+      plan,
+    },
   });
-};
+});
+
+// '/tours-within/:distance/center/:latlng/unit/:unit',
+// '/tours-within/:233/center/:34.112332,-118.114024/unit/:unit',
+
+exports.getToursWithin = catchAsync(async (req, res, next) => {
+  const { distance, latlng, unit } = req.params;
+  const [lat, lng] = latlng.split(',');
+
+  const radius = unit === 'mi' ? distance / 3963.2 : distance / 6378.1;
+
+  if (!lat || !lng) {
+    next(
+      new AppError(
+        'Please provide latitude and longitude in the format of lat,lng.',
+        400,
+      ),
+    );
+  }
+  console.log(
+    '🚀 ~ tourController.js:126 ~ distance, latlng, unit:',
+    distance,
+    lat,
+    lng,
+    unit,
+  );
+
+  const tours = await Tour.find({
+    startLocation: { $geoWithin: { $centerSphere: [[lng, lat], radius] } },
+  });
+  res.status(200).json({
+    status: 'success',
+    results: tours.length,
+    data: {
+      tours,
+    },
+  });
+});
+
+exports.getDistance = catchAsync(async (req, res, next) => {
+  const { latlng, unit } = req.params;
+  const [lat, lng] = latlng.split(',');
+  const multiplier = unit === 'mi' ? 0.000621371 : 0.001;
+
+  if (!lat || !lng)
+    next(
+      new AppError(
+        'Please provide latitude and longitude in the format of lat,lng.',
+        400,
+      ),
+    );
+  const distances = await Tour.aggregate([
+    {
+      $geoNear: {
+        near: {
+          type: 'Point',
+          coordinates: [lng * 1, lat * 1],
+        },
+        distanceField: 'distance',
+        distanceMultiplier: multiplier,
+      },
+    },
+    {
+      $project: {
+        distance: 1,
+        name: 1,
+      },
+    },
+  ]);
+  res.status(200).json({
+    status: 'success',
+    data: {
+      tours: distances,
+    },
+  });
+});

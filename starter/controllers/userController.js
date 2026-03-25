@@ -1,71 +1,63 @@
-const fs = require('fs');
+const User = require('../models/userModel');
+const AppError = require('../utils/appError');
+const catchAsync = require('../utils/catchAsync');
+const factory = require('./handlerFactory');
 
-const users = JSON.parse(
-  fs.readFileSync(`${__dirname}/../dev-data/data/users-simple.json`),
-);
+const filterObj = (obj, ...allowedFields) => {
+  const newObj = {};
+  Object.keys(obj).forEach((el) => {
+    if (allowedFields.includes(el)) newObj[el] = obj[el];
+  });
+  return newObj;
+};
 
-exports.getAllUsers = (req, res) => {
+exports.getMe = (req, res, next) => {
+  const user = {
+    name: req.user.name,
+    email: req.user.email,
+  };
+
   res.status(200).json({
     status: 'success',
-    requestedAt: req.requestTime,
-    results: users.length,
-    data: { users: users },
+    data: { user },
   });
 };
 
-exports.addNewUser = (req, res) => {
-  const newId = users[users.length - 1].id + 1;
-  const newTour = Object.assign({ id: newId }, req.body);
+exports.updateMe = catchAsync(async (req, res, next) => {
+  if (req.body.password || req.body.passwordConfirm) {
+    return next(
+      new AppError(
+        'This route is not for password updates. Please use /updateMyPassword.',
+        400,
+      ),
+    );
+  }
 
-  users.push(newTour);
-  fs.writeFile(
-    `${__dirname}/dev-data/data/users-simple.json`,
-    JSON.stringify(users),
-    (err) => {
-      res.status(201).json({
-        status: 'success',
-        data: {
-          tour: newTour,
-        },
-      });
-    },
-  );
-};
+  const filteredBody = filterObj(req.body, 'name', 'email');
 
-exports.getUser = (req, res) => {
-  const id = Number(req.params.id);
-  const user = users.find((user) => user.id === id);
+  const updatedUser = await User.findByIdAndUpdate(req.user.id, filteredBody, {
+    new: true,
+    runValidators: true,
+  });
 
-  if (!user)
-    return res.status(404).send({ status: 'fail', message: 'Invalid Id' });
-
-  res.status(200).send({ status: 'success', data: { user } });
-};
-
-exports.updateUser = (req, res) => {
-  const id = Number(req.params.id);
-  const user = users.find((user) => user.id === id);
-
-  if (!user)
-    return res.status(404).send({ status: 'fail', message: 'Invalid Id' });
-
-  res.status(200).send({
+  res.status(200).json({
     status: 'success',
     data: {
-      user: '<h1>updated user here<h1/>',
+      user: updatedUser,
     },
   });
-};
+});
 
-exports.deleteUser = (req, res) => {
-  const id = Number(req.params.id);
-  const user = users.find((user) => user.id === id);
+exports.deleteMe = catchAsync(async (req, res, next) => {
+  await User.findByIdAndUpdate(req.user.id, { active: false });
 
-  if (!user)
-    return res.status(404).send({ status: 'fail', message: 'Invalid Id' });
-
-  res.status(204).send({
+  res.status(204).json({
     status: 'success',
     data: null,
   });
-};
+});
+
+exports.getAllUsers = factory.getAll(User);
+exports.getUser = factory.getOne(User);
+exports.updateUser = factory.updateOne(User);
+exports.deleteUser = factory.deleteOne(User);
